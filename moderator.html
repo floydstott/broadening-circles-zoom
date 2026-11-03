@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Broadening Circles — Moderator</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="bc">
+<div class="bc-container">
+
+<div id="screen-home" class="bc-panel" style="max-width:520px;margin:60px auto;">
+  <h1>Broadening Circles — Moderator</h1>
+  <p class="bc-muted">Create a new game room or load an existing one.</p>
+  <div class="bc-col">
+    <button class="bc-btn" id="btnCreate">Create New Room</button>
+    <div class="bc-row">
+      <input class="bc-input" id="joinCode" placeholder="Existing room code (e.g. ABCD)" maxlength="4" style="text-transform:uppercase;">
+      <button class="bc-btn secondary" id="btnJoin">Load</button>
+    </div>
+    <div id="homeMsg" class="bc-muted"></div>
+  </div>
+</div>
+
+<div id="screen-lobby" style="display:none;">
+  <div class="bc-header">
+    <div>
+      <div class="bc-muted">Room code</div>
+      <div class="bc-code" id="lobbyCode"></div>
+    </div>
+    <div>
+      <div class="bc-muted">Share with players:</div>
+      <div id="lobbyLink" style="font-family:ui-monospace,monospace; font-size:13px;"></div>
+    </div>
+  </div>
+  <div class="bc-panel">
+    <h2>Lobby</h2>
+    <p class="bc-muted">Players join on their phones and pick a team. You need at least one player per team to start.</p>
+    <div id="lobbyTeams"></div>
+    <div style="margin-top:16px;" class="bc-row">
+      <button class="bc-btn" id="btnStart" disabled>Start Game</button>
+      <button class="bc-btn danger" id="btnResetRoom">Delete Room</button>
+    </div>
+  </div>
+</div>
+
+<div id="screen-play" style="display:none;">
+  <div class="bc-header">
+    <div>
+      <div class="bc-muted">Room</div>
+      <div class="bc-code" id="playCode"></div>
+    </div>
+    <div>
+      <div class="bc-muted">Round <span id="roundNum">1</span> of <span id="roundTotal">8</span></div>
+      <div class="bc-phase" id="phaseLabel">—</div>
+    </div>
+    <div>
+      <div class="bc-muted">First Team</div>
+      <div id="firstTeamPill"></div>
+    </div>
+  </div>
+
+  <div class="bc-layout">
+    <div>
+      <div class="bc-panel">
+        <h2>Environment</h2>
+        <div id="envDisplay"></div>
+        <div id="envControls" style="margin-top:12px;"></div>
+      </div>
+      <div class="bc-panel">
+        <h2>Board</h2>
+        <svg class="bc-board" id="boardSvg" viewBox="-500 -500 1000 1000"></svg>
+      </div>
+    </div>
+    <div>
+      <div class="bc-panel">
+        <h2>Teams</h2>
+        <div id="teamsPanel"></div>
+      </div>
+      <div class="bc-panel">
+        <h2>Env Deck</h2>
+        <div id="deckList" style="font-size:13px;"></div>
+      </div>
+      <div class="bc-panel">
+        <button class="bc-btn secondary" id="btnProjector">Open Projector View</button>
+        <button class="bc-btn danger" id="btnEndGame" style="margin-top:8px;">End Game</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<script src="cards.js"></script>
+<script src="board.js"></script>
+<script src="sync.js"></script>
+<script>
+var G = { code: null, cfg: null, board: null, hands:{}, selected:{}, dice:{}, players:[], poller: null, timerInt: null };
+
+function $(s){ return document.querySelector(s); }
+function show(id){ ['screen-home','screen-lobby','screen-play'].forEach(function(x){ $('#'+x).style.display = (x===id)?'block':'none'; }); }
+
+function setMsg(msg, err){ var m = $('#homeMsg'); m.textContent = msg||''; m.style.color = err ? '#c23b3b' : '#666'; }
+
+// --- Home ---
+$('#btnCreate').onclick = function(){
+  return guard('create-room', async function(){
+    $('#btnCreate').disabled = true;
+    try {
+      for (var tries=0; tries<20; tries++) {
+        var code = genRoomCode();
+        if (await sGet(rKey(code,'cfg'))) continue;
+        try {
+          await sSet(rKey(code,'cfg'), newCfg(code));
+          enterRoom(code);
+          return;
+        } catch (error) {
+          // Another moderator can claim the same random code after our GET.
+          // A version conflict means choose another code; other failures surface.
+          if (!error || error.status !== 409) throw error;
+        }
+      }
+      setMsg('Could not allocate room code, please retry.', true);
+    } finally {
+      $('#btnCreate').disabled = false;
+    }
+  });
+};
+$('#btnJoin').onclick = async function(){
+  var code = ($('#joinCode').value||'').trim().toUpperCase();
+  if (!/^[A-Z2-9]{4}$/.test(code)) { setMsg('Enter a 4-character room code.', true); return; }
+  var cfg = await sGet(rKey(code,'cfg'));
+  if (!cfg) { setMsg('No room with that code.', true); return; }
+  enterRoom(code);
+};
+
+function enterRoom(code){
+  G.code = code;
+  sessionStorage.setItem('bc_mod_room', code);
+  startPolling();
+}
+
+// --- Polling & state ---
+function startPolling(){
+  if (G.poller) G.poller.stop();
+  G.poller = makePoller(async function(){
+    var snapshot = await sSnapshot(G.code);
+    var cfg = snapshot[rKey(G.code,'cfg')];
+    if (!cfg) return;
+    G.cfg = cfg;
+    var players = snapshot[rKey(G.code,'players')] || [];
+    G.players = Array.isArray(players) ? players : [];
+    if (cfg.phase === 'playing' || cfg.phase === 'ended') {
+      G.board = snapshot[rKey(G.code,'board')] || Board.emptyState();
+      for (var i=0;i<TEAM_IDS.length;i++){
+        var t = TEAM_IDS[i];
+        G.hands[t] = snapshot[rKey(G.code,'hand_'+t)];
+        G.selected[t] = snapshot[rKey(G.code,'sel_'+t)];
+        G.dice[t] = snapshot[rKey(G.code,'dice_'+t)];
+      }
+    }
+    render();
+  });
+  G.poller.start();
+}
+
+function render(){
+  if (!G.cfg) return;
+  if (G.cfg.phase === 'lobby') renderLobby();
+  else renderPlay();
+}
+
+// --- Lobby ---
+function renderLobby(){
+  show('screen-lobby');
+  $('#lobbyCode').textContent = G.cfg.code;
+  var base = location.href.replace(/\/[^\/]*$/, '/');
+  $('#lobbyLink').textContent = base + 'index.html?room=' + G.cfg.code;
+  var h = '';
+  TEAM_IDS.forEach(function(t){
+    var team = TEAMS[t];
+    var members = G.players.filter(function(p){ return p.team === t; });
+    h += '<div class="bc-row" style="margin:8px 0;">';
+    h += '<span class="bc-team-pill '+t+'">'+team.display+'</span>';
+    h += '<div class="bc-player-list">';
+    members.forEach(function(m){ h += '<span class="bc-player-chip">'+escapeHtml(m.name)+'</span>'; });
+    if (members.length===0) h += '<span class="bc-muted">waiting…</span>';
+    h += '</div></div>';
+  });
+  $('#lobbyTeams').innerHTML = h;
+  var allTeamsHaveMember = TEAM_IDS.every(function(t){ return G.players.some(function(p){ return p.team===t; }); });
+  $('#btnStart').disabled = !allTeamsHaveMember;
+}
+
+$('#btnStart').onclick = function(){ return guard('start-game', async function(){
+  // Randomly assign sectors to teams (shuffle both sector difficulties & screen positions).
+  var sectors = shuffle(['easy','medium','hard']);
+  var positions = shuffle([0,1,2]);
+  var teamsShuffled = shuffle(TEAM_IDS.slice());
+  var assign = [];
+  for (var i=0;i<3;i++){
+    assign.push({ position: positions[i], team: teamsShuffled[i], sector: sectors[i] });
+  }
+  assign.sort(function(a,b){ return a.position - b.position; });
+
+  var operations = [];
+  // Deal hands
+  for (var j=0;j<TEAM_IDS.length;j++){
+    var t = TEAM_IDS[j];
+    var team = TEAMS[t];
+    var hand = { resources: pick(team.resources, 3), outcomes: [] };
+    if (t === 'balanced') {
+      hand.outcomes = pick(OUTCOMES_RESEARCH, 2).map(function(o){return{text:o, color:'research'};})
+        .concat(pick(OUTCOMES_PATIENT, 2).map(function(o){return{text:o, color:'patient'};}));
+    } else {
+      var outs = TEAMS[t].outcomes;
+      hand.outcomes = pick(outs, 3).map(function(o){ return { text:o, color: team.outcomeColor }; });
+    }
+    operations.push({op:'set', key:rKey(G.code,'hand_'+t), value:hand});
+    operations.push({op:'set', key:rKey(G.code,'sel_'+t), value:{ resource:null, outcome:null, outcomeColor:null }});
+    operations.push({op:'set', key:rKey(G.code,'dice_'+t), value:{ rolls:[], used:[] }});
+  }
+
+  // Env deck (8 cards, first is a Value)
+  var deck = buildEnvDeck(8);
+  // Board state
+  var board = Board.emptyState();
+  operations.push({op:'set', key:rKey(G.code,'board'), value:board});
+
+  var firstTeamIdx = Math.floor(Math.random()*3);
+  operations.push({op:'merge_fields', key:rKey(G.code,'cfg'), changes:[
+    {path:'phase', value:'playing'},
+    {path:'roundPhase', value:'idle'},
+    {path:'round', value:0},
+    {path:'firstTeamIdx', value:firstTeamIdx},
+    {path:'sectorAssignments', value:assign},
+    {path:'envDeck', value:deck},
+    {path:'envShown', value:-1},
+    {path:'timer', value:null},
+    {path:'extraDieTo', value:null}
+  ]});
+  var values = await sBatch(operations);
+  G.cfg = values[rKey(G.code,'cfg')] || G.cfg;
+  G.board = values[rKey(G.code,'board')] || board;
+}); };
+
+$('#btnResetRoom').onclick = async function(){
+  if (!confirm('Delete the entire room? This cannot be undone.')) return;
+  await sReset('room_'+G.code+'_');
+  if (G.poller) G.poller.stop();
+  sessionStorage.removeItem('bc_mod_room');
+  location.reload();
+};
+
+// --- Play ---
+var boardInit = false;
+function renderPlay(){
+  show('screen-play');
+  $('#playCode').textContent = G.cfg.code;
+  $('#roundNum').textContent = (G.cfg.round + 1);
+  $('#roundTotal').textContent = G.cfg.envDeck.length;
+  var phaseText = {
+    idle: 'Ready to flip environment card',
+    prep: 'Teams are preparing pitches (60s)',
+    pitched: G.cfg.envDeck[G.cfg.envShown] && G.cfg.envDeck[G.cfg.envShown].type==='value' ? 'Choose who gets the extra die' : 'Ready to roll',
+    rolling: 'Teams rolling and moving pieces',
+    ended: 'Game complete'
+  };
+  $('#phaseLabel').textContent = phaseText[G.cfg.roundPhase] || G.cfg.roundPhase;
+
+  // First team pill
+  var ft = G.cfg.teamOrder[G.cfg.firstTeamIdx];
+  $('#firstTeamPill').innerHTML = '<span class="bc-team-pill '+ft+'">'+TEAMS[ft].display+'</span>';
+
+  // Board
+  if (!boardInit) { BoardRender.init($('#boardSvg'), { interactive:false }); boardInit = true; }
+  BoardRender.setSectors(G.cfg.sectorAssignments);
+  BoardRender.render(G.board || Board.emptyState());
+
+  // Env display
+  renderEnv();
+
+  // Teams panel
+  renderTeams();
+
+  // Deck list
+  renderDeck();
+}
+
+function renderEnv(){
+  var idx = G.cfg.envShown;
+  var host = $('#envDisplay');
+  var ctrl = $('#envControls');
+  if (idx < 0) {
+    host.innerHTML = '<div class="bc-muted">No environment card shown yet.</div>';
+  } else {
+    var card = G.cfg.envDeck[idx];
+    host.innerHTML = '<div class="bc-env-card '+card.type+'"><div class="bc-env-type">'+card.type.toUpperCase()+'</div><div>'+escapeHtml(card.text)+'</div></div>';
+    if (G.cfg.timer) {
+      var rem = timerRemaining(G.cfg.timer);
+      host.innerHTML += '<div style="margin-top:10px;text-align:center;"><span class="bc-timer '+(rem<=10?'warn':'')+'" id="timerDisp">'+formatTime(rem)+'</span></div>';
+    }
+  }
+
+  var h = '';
+  if (G.cfg.roundPhase === 'idle') {
+    h = '<button class="bc-btn" id="btnFlip">Flip Environment Card</button>';
+  } else if (G.cfg.roundPhase === 'prep') {
+    h = '<button class="bc-btn secondary" id="btnEndPrep">Skip Timer / Teams Ready</button>';
+  } else if (G.cfg.roundPhase === 'pitched') {
+    var card = G.cfg.envDeck[idx];
+    if (card && card.type === 'value') {
+      h = '<div class="bc-muted">Extra movement die: (first team chooses)</div><div class="bc-row" style="margin-top:6px;">';
+      TEAM_IDS.forEach(function(t){
+        var sel = G.cfg.extraDieTo === t ? ' style="outline:3px solid #ffd400"' : '';
+        h += '<button class="bc-btn secondary"'+sel+' data-team="'+t+'">'+TEAMS[t].short+'</button>';
+      });
+      h += '</div><button class="bc-btn" id="btnRoll" style="margin-top:8px;" '+(G.cfg.extraDieTo?'':'disabled')+'>All Teams Roll &amp; Move</button>';
+    } else {
+      h = '<button class="bc-btn" id="btnRoll">All Teams Roll &amp; Move Backwards</button>';
+    }
+  } else if (G.cfg.roundPhase === 'rolling') {
+    h = '<button class="bc-btn" id="btnNext">Next Round ▶</button>';
+    if (G.cfg.round === G.cfg.envDeck.length - 1) {
+      h = '<button class="bc-btn" id="btnNext">End Game</button>';
+    }
+  } else if (G.cfg.roundPhase === 'ended') {
+    h = '<div class="bc-ok">Game ended.</div>';
+  }
+  ctrl.innerHTML = h;
+
+  var fb = $('#btnFlip'); if (fb) fb.onclick = flipCard;
+  var eb = $('#btnEndPrep'); if (eb) eb.onclick = endPrep;
+  ctrl.querySelectorAll('button[data-team]').forEach(function(b){ b.onclick = function(){ chooseExtraDie(b.getAttribute('data-team')); }; });
+  var rb = $('#btnRoll'); if (rb) rb.onclick = rollAll;
+  var nb = $('#btnNext'); if (nb) nb.onclick = nextRound;
+
+  // Live timer update
+  if (G.timerInt) clearInterval(G.timerInt);
+  if (G.cfg.timer) {
+    G.timerInt = setInterval(function(){
+      var rem = timerRemaining(G.cfg.timer);
+      var el = $('#timerDisp');
+      if (el) { el.textContent = formatTime(rem); el.className = 'bc-timer '+(rem<=10?'warn':''); }
+      if (rem <= 0 && G.cfg.roundPhase === 'prep') {
+        // auto-advance to pitched
+        clearInterval(G.timerInt); G.timerInt = null;
+        endPrep();
+      }
+    }, 500);
+  }
+}
+
+function renderTeams(){
+  var h = '';
+  TEAM_IDS.forEach(function(t){
+    var sel = G.selected[t] || {};
+    var dice = G.dice[t];
+    var assignment = (G.cfg.sectorAssignments||[]).find(function(a){ return a.team===t; });
+    h += '<div style="border-top:1px solid #eee;padding:10px 0;">';
+    h += '<div class="bc-row"><span class="bc-team-pill '+t+'">'+TEAMS[t].short+'</span>';
+    if (assignment) h += '<span class="bc-muted">'+SECTOR_LABELS[assignment.sector]+' sector</span>';
+    h += '</div>';
+    h += '<div class="bc-muted" style="margin-top:4px;">Pitch:</div>';
+    h += '<div style="font-size:13px;">Resource: <b>'+escapeHtml(sel.resource||'—')+'</b></div>';
+    var outText = sel.outcome ? escapeHtml(sel.outcome) : '—';
+    var outColor = sel.outcomeColor ? ' ('+sel.outcomeColor+')' : '';
+    h += '<div style="font-size:13px;">Outcome: <b>'+outText+outColor+'</b></div>';
+    if (dice && dice.rolls) {
+      h += '<div class="bc-dice" style="margin-top:6px;">';
+      dice.rolls.forEach(function(n,i){
+        var used = dice.used && dice.used[i];
+        h += '<div class="bc-die'+(used?' used':'')+'">'+n+'</div>';
+      });
+      h += '</div>';
+    }
+    h += '</div>';
+  });
+  $('#teamsPanel').innerHTML = h;
+}
+
+function renderDeck(){
+  var h = '';
+  G.cfg.envDeck.forEach(function(c, i){
+    var marker = i < G.cfg.envShown ? '✓' : (i === G.cfg.envShown ? '▶' : '·');
+    h += '<div>'+marker+' <span style="color:'+(c.type==='value'?'#c88a20':'#3a3a3a')+';font-weight:600;">'+c.type+'</span> — '+escapeHtml(c.text)+'</div>';
+  });
+  $('#deckList').innerHTML = h;
+}
+
+// --- Actions ---
+async function flipCard(){ return guard('flip-card', async function(){
+  // Clear selections
+  var operations = [];
+  for (var i=0;i<TEAM_IDS.length;i++){
+    operations.push({op:'merge_fields', key:rKey(G.code,'sel_'+TEAM_IDS[i]), changes:[
+      {path:'resource', value:null},
+      {path:'outcome', value:null},
+      {path:'outcomeColor', value:null}
+    ]});
+    operations.push({op:'merge_fields', key:rKey(G.code,'dice_'+TEAM_IDS[i]), changes:[
+      {path:'rolls', value:[]},
+      {path:'used', value:[]}
+    ]});
+  }
+  operations.push({op:'merge_fields', key:rKey(G.code,'cfg'), changes:[
+    {path:'envShown', value:G.cfg.round},
+    {path:'roundPhase', value:'prep'},
+    {path:'timer', value:{ startTs:Date.now(), duration:60 }},
+    {path:'extraDieTo', value:null}
+  ]});
+  var values = await sBatch(operations);
+  G.cfg = values[rKey(G.code,'cfg')] || G.cfg;
+}); }
+
+async function endPrep(){ return guard('end-prep', async function(){
+  G.cfg = await sMergeFields(rKey(G.code,'cfg'), [
+    {path:'roundPhase', value:'pitched'},
+    {path:'timer', value:null}
+  ]);
+}); }
+
+async function chooseExtraDie(team){ return guard('choose-extra-die', async function(){
+  G.cfg = await sMergeField(rKey(G.code,'cfg'), 'extraDieTo', team);
+}); }
+
+async function rollAll(){ return guard('roll-all', async function(){
+  var card = G.cfg.envDeck[G.cfg.envShown];
+  var operations = [];
+  for (var i=0;i<TEAM_IDS.length;i++){
+    var t = TEAM_IDS[i];
+    var numDice = 1;
+    if (card.type === 'value' && G.cfg.extraDieTo === t) numDice = 2;
+    var rolls = []; for (var j=0;j<numDice;j++) rolls.push(roll3());
+    operations.push({op:'merge_fields', key:rKey(G.code,'dice_'+t), changes:[
+      {path:'rolls', value:rolls},
+      {path:'used', value:rolls.map(function(){return false;})}
+    ]});
+  }
+  operations.push({op:'merge_field', key:rKey(G.code,'cfg'), path:'roundPhase', value:'rolling'});
+  var values = await sBatch(operations);
+  G.cfg = values[rKey(G.code,'cfg')] || G.cfg;
+}); }
+
+async function nextRound(){ return guard('next-round', async function(){
+  var changes;
+  if (G.cfg.round >= G.cfg.envDeck.length - 1) {
+    changes = [
+      {path:'roundPhase', value:'ended'},
+      {path:'phase', value:'ended'}
+    ];
+  } else {
+    changes = [
+      {path:'round', value:G.cfg.round + 1},
+      {path:'roundPhase', value:'idle'},
+      {path:'envShown', value:-1},
+      {path:'firstTeamIdx', value:(G.cfg.firstTeamIdx + 1) % 3},
+      {path:'timer', value:null},
+      {path:'extraDieTo', value:null}
+    ];
+  }
+  G.cfg = await sMergeFields(rKey(G.code,'cfg'), changes);
+}); }
+
+$('#btnProjector').onclick = function(){ window.open('board.html?room='+G.code, '_blank'); };
+$('#btnEndGame').onclick = async function(){
+  if (!confirm('End the game now?')) return;
+  return guard('end-game', async function(){
+    G.cfg = await sMergeFields(rKey(G.code,'cfg'), [
+      {path:'phase', value:'ended'},
+      {path:'roundPhase', value:'ended'}
+    ]);
+  });
+};
+
+// Utilities
+function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function formatTime(sec){ if (sec==null) return ''; var m=Math.floor(sec/60); var s=sec%60; return m+':'+(s<10?'0':'')+s; }
+
+// Auto-rejoin if we had a room
+(function(){
+  var prev = sessionStorage.getItem('bc_mod_room');
+  if (prev) {
+    sGet(rKey(prev,'cfg')).then(function(cfg){
+      if (cfg) enterRoom(prev);
+    });
+  }
+})();
+</script>
+</body>
+</html>

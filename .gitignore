@@ -1,0 +1,13 @@
+.DS_Store
+
+# Live room data
+data/room_*.json
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+
+# Test and editor artifacts
+coverage/
+.idea/
+.vscode/
+*.log

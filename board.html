@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Broadening Circles — Projector</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="styles.css">
+<style>
+  body.bc { background: #1a0f24; color: #fff; padding: 0; }
+  .proj-wrap { display: grid; grid-template-columns: 1fr 420px; gap: 16px; padding: 16px; height: 100vh; }
+  .proj-board { display:flex; align-items:center; justify-content:center; background: #261534; border-radius: 16px; padding: 12px; }
+  .proj-board svg { width: 100%; height: 100%; max-height: 95vh; }
+  .proj-side { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+  .proj-panel { background: #2f1a46; border-radius: 12px; padding: 16px; }
+  .proj-panel h2 { color: #ffd400; margin: 0 0 8px; }
+  .proj-code { font-family: ui-monospace, monospace; font-size: 42px; letter-spacing: 6px; color: #ffd400; font-weight: 800; }
+  .proj-env { font-size: 28px; font-weight: 700; padding: 20px; border-radius: 12px; text-align: center; }
+  .proj-env.value { background: #c88a20; }
+  .proj-env.challenge { background: #3a3a3a; }
+  .proj-timer { font-size: 72px; font-weight: 800; text-align: center; font-variant-numeric: tabular-nums; color: #ffd400; }
+  .proj-timer.warn { color: #ff6b6b; }
+  .proj-team-row { display:flex; align-items:center; gap:10px; padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.08); }
+  .proj-team-row:first-child { border-top: 0; }
+  .proj-dice { display:flex; gap:6px; }
+  .proj-die { width:36px; height:36px; border-radius:6px; background:#fff; color:#4a2a6b; display:flex;align-items:center;justify-content:center; font-weight:700; font-size:20px; }
+  .proj-die.used { opacity: 0.3; }
+</style>
+</head>
+<body class="bc">
+<div class="proj-wrap">
+  <div class="proj-board">
+    <svg id="boardSvg" viewBox="-500 -500 1000 1000"></svg>
+  </div>
+  <div class="proj-side">
+    <div class="proj-panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div class="bc-muted">Room</div>
+          <div class="proj-code" id="codeDisp">—</div>
+        </div>
+        <div style="text-align:right;">
+          <div class="bc-muted">Round</div>
+          <div style="font-size:32px;font-weight:700;color:#ffd400;"><span id="roundNum">—</span>/<span id="roundTotal">—</span></div>
+        </div>
+      </div>
+      <div style="margin-top:8px;" class="bc-muted">First team: <span id="firstTeam">—</span></div>
+    </div>
+    <div class="proj-panel">
+      <h2>Environment</h2>
+      <div id="envDisp"></div>
+      <div id="timerBox" style="margin-top:10px;"></div>
+    </div>
+    <div class="proj-panel">
+      <h2>Teams</h2>
+      <div id="teamsBox"></div>
+    </div>
+  </div>
+</div>
+
+<script src="cards.js"></script>
+<script src="board.js"></script>
+<script src="sync.js"></script>
+<script>
+var G = { code:null, cfg:null, board:null, allSel:{}, allDice:{}, poller:null, timerInt:null };
+function $(s){ return document.querySelector(s); }
+function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function formatTime(sec){ if (sec==null) return ''; var m=Math.floor(sec/60); var s=sec%60; return m+':'+(s<10?'0':'')+s; }
+
+(function(){
+  var m = location.search.match(/room=([A-Z2-9]{4})/i);
+  if (!m) { document.body.innerHTML = '<div style="padding:40px;text-align:center;">Add <code>?room=CODE</code> to the URL.</div>'; return; }
+  G.code = m[1].toUpperCase();
+  start();
+})();
+
+var boardInit = false;
+function start(){
+  G.poller = makePoller(async function(){
+    var snapshot = await sSnapshot(G.code);
+    var cfg = snapshot[rKey(G.code,'cfg')]; if (!cfg) return;
+    G.cfg = cfg;
+    if (cfg.phase === 'playing' || cfg.phase === 'ended') {
+      G.board = snapshot[rKey(G.code,'board')] || Board.emptyState();
+      for (var i=0;i<TEAM_IDS.length;i++){
+        G.allSel[TEAM_IDS[i]] = snapshot[rKey(G.code,'sel_'+TEAM_IDS[i])];
+        G.allDice[TEAM_IDS[i]] = snapshot[rKey(G.code,'dice_'+TEAM_IDS[i])];
+      }
+    }
+    render();
+  });
+  G.poller.start();
+}
+
+function render(){
+  if (!G.cfg) return;
+  $('#codeDisp').textContent = G.cfg.code;
+  $('#roundNum').textContent = (G.cfg.envDeck && G.cfg.envDeck.length) ? (G.cfg.round+1) : '—';
+  $('#roundTotal').textContent = (G.cfg.envDeck && G.cfg.envDeck.length) ? G.cfg.envDeck.length : '—';
+  var ft = G.cfg.teamOrder ? G.cfg.teamOrder[G.cfg.firstTeamIdx] : null;
+  $('#firstTeam').innerHTML = ft ? '<span class="bc-team-pill '+ft+'">'+TEAMS[ft].display+'</span>' : '—';
+
+  // Env
+  var host = $('#envDisp');
+  if (!G.cfg.envDeck || G.cfg.envShown < 0) {
+    host.innerHTML = '<div class="bc-muted">Waiting for next environment card…</div>';
+  } else {
+    var c = G.cfg.envDeck[G.cfg.envShown];
+    host.innerHTML = '<div class="proj-env '+c.type+'">'+c.type.toUpperCase()+': '+escapeHtml(c.text)+'</div>';
+  }
+
+  // Timer
+  if (G.timerInt) { clearInterval(G.timerInt); G.timerInt = null; }
+  var tb = $('#timerBox');
+  if (G.cfg.timer) {
+    var paint = function(){
+      var rem = timerRemaining(G.cfg.timer);
+      tb.innerHTML = '<div class="proj-timer '+(rem<=10?'warn':'')+'">'+formatTime(rem)+'</div>';
+    };
+    paint();
+    G.timerInt = setInterval(paint, 500);
+  } else {
+    tb.innerHTML = '';
+  }
+
+  // Teams
+  var th = '';
+  TEAM_IDS.forEach(function(t){
+    var sel = G.allSel[t] || {};
+    var dice = G.allDice[t];
+    var asg = (G.cfg.sectorAssignments||[]).find(function(a){return a.team===t;});
+    th += '<div class="proj-team-row">';
+    th += '<span class="bc-team-pill '+t+'">'+TEAMS[t].short+'</span>';
+    if (asg) th += '<span class="bc-muted">'+SECTOR_LABELS[asg.sector]+'</span>';
+    if (dice && dice.rolls) {
+      th += '<div class="proj-dice">';
+      dice.rolls.forEach(function(n,i){
+        var used = dice.used && dice.used[i];
+        th += '<div class="proj-die'+(used?' used':'')+'">'+n+'</div>';
+      });
+      th += '</div>';
+    }
+    th += '</div>';
+    if (sel.resource || sel.outcome) {
+      th += '<div style="font-size:13px;opacity:0.85;padding-left:4px;">';
+      if (sel.resource) th += '<div>R: '+escapeHtml(sel.resource)+'</div>';
+      if (sel.outcome) th += '<div>O: '+escapeHtml(sel.outcome)+'</div>';
+      th += '</div>';
+    }
+  });
+  $('#teamsBox').innerHTML = th;
+
+  // Board
+  if (G.cfg.sectorAssignments) {
+    if (!boardInit) { BoardRender.init($('#boardSvg'), { interactive: false }); boardInit = true; }
+    BoardRender.setSectors(G.cfg.sectorAssignments);
+    BoardRender.render(G.board || Board.emptyState());
+  }
+}
+</script>
+</body>
+</html>

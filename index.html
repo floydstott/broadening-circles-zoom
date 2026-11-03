@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Broadening Circles — Player</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="bc">
+<div class="bc-container">
+
+<div id="screen-join" class="bc-panel" style="max-width:520px;margin:40px auto;">
+  <h1>Broadening Circles</h1>
+  <div class="bc-col">
+    <label>Room code
+      <input class="bc-input" id="joinCode" maxlength="4" placeholder="ABCD" style="text-transform:uppercase;">
+    </label>
+    <label>Your name
+      <input class="bc-input" id="joinName" maxlength="24" placeholder="Your name">
+    </label>
+    <div>
+      <div class="bc-muted" style="margin-bottom:6px;">Pick your team:</div>
+      <div class="bc-row">
+        <button class="bc-btn secondary" data-team="research">Research-Centered</button>
+        <button class="bc-btn secondary" data-team="patient">Patient-Centered</button>
+        <button class="bc-btn secondary" data-team="balanced">Balanced</button>
+      </div>
+      <div id="teamChoice" class="bc-muted" style="margin-top:6px;">No team selected.</div>
+    </div>
+    <button class="bc-btn" id="btnJoin">Join Room</button>
+    <div id="joinMsg" class="bc-muted"></div>
+  </div>
+</div>
+
+<div id="screen-lobby" class="bc-panel" style="display:none;max-width:520px;margin:40px auto;">
+  <h1>Waiting for moderator…</h1>
+  <p class="bc-muted">Room <b id="lobbyCode"></b> — team <span id="lobbyTeam"></span></p>
+  <div id="lobbyRoster"></div>
+</div>
+
+<div id="screen-play" style="display:none;">
+  <div class="bc-header">
+    <div>
+      <div class="bc-muted">Room · <span id="playCode"></span></div>
+      <div id="myTeamPill"></div>
+    </div>
+    <div>
+      <div class="bc-muted">Round <span id="roundNum">1</span> / <span id="roundTotal">8</span></div>
+      <div class="bc-phase" id="phaseLabel">—</div>
+    </div>
+    <div>
+      <div class="bc-muted">First Team</div>
+      <div id="firstTeamPill"></div>
+    </div>
+  </div>
+
+  <div class="bc-layout">
+    <div>
+      <div class="bc-panel">
+        <h2>Environment</h2>
+        <div id="envDisplay"></div>
+      </div>
+      <div class="bc-panel">
+        <h2>Board</h2>
+        <svg class="bc-board" id="boardSvg" viewBox="-500 -500 1000 1000"></svg>
+        <div id="moveHint" class="bc-hint" style="display:none;"></div>
+        <div id="diceRow" class="bc-dice" style="margin-top:8px;"></div>
+        <div id="placeControls" style="margin-top:8px;"></div>
+      </div>
+    </div>
+    <div>
+      <div class="bc-panel">
+        <h2>Your hand</h2>
+        <h3>Resources</h3>
+        <div class="bc-card-grid" id="resList"></div>
+        <h3 style="margin-top:12px;">Outcomes</h3>
+        <div class="bc-card-grid" id="outList"></div>
+      </div>
+      <div class="bc-panel">
+        <h2>Pitches</h2>
+        <div id="pitchesList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script src="cards.js"></script>
+<script src="board.js"></script>
+<script src="sync.js"></script>
+<script>
+var G = {
+  code: null, name: null, team: null,
+  cfg: null, board: null, hand: null, selected: null, dice: null,
+  allSelected: {}, allDice: {}, players: [],
+  poller: null, timerInt: null,
+  chosenTeamBtn: null,
+  ui: { selectedDieIdx: null, selectedPieceId: null, placing: false }
+};
+
+function $(s){ return document.querySelector(s); }
+function show(id){ ['screen-join','screen-lobby','screen-play'].forEach(function(x){ $('#'+x).style.display = (x===id)?'block':'none'; }); }
+function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function formatTime(sec){ if (sec==null) return ''; var m=Math.floor(sec/60); var s=sec%60; return m+':'+(s<10?'0':'')+s; }
+
+// Prefill room from URL
+(function(){
+  var m = location.search.match(/room=([A-Z2-9]{4})/i);
+  if (m) $('#joinCode').value = m[1].toUpperCase();
+})();
+
+// Team picker
+document.querySelectorAll('#screen-join [data-team]').forEach(function(b){
+  b.onclick = function(){
+    document.querySelectorAll('#screen-join [data-team]').forEach(function(x){ x.classList.remove('selected'); x.style.outline=''; });
+    b.style.outline = '3px solid #4a2a6b';
+    G.chosenTeamBtn = b.getAttribute('data-team');
+    $('#teamChoice').textContent = 'Team: ' + TEAMS[G.chosenTeamBtn].display;
+  };
+});
+
+$('#btnJoin').onclick = function(){ return guard('join-room', async function(){
+  var code = ($('#joinCode').value||'').trim().toUpperCase();
+  var name = ($('#joinName').value||'').trim();
+  if (!/^[A-Z2-9]{4}$/.test(code)) { $('#joinMsg').textContent = 'Enter a valid 4-char code.'; return; }
+  if (!name) { $('#joinMsg').textContent = 'Enter your name.'; return; }
+  if (!G.chosenTeamBtn) { $('#joinMsg').textContent = 'Pick a team.'; return; }
+  var cfg = await sGet(rKey(code,'cfg'));
+  if (!cfg) { $('#joinMsg').textContent = 'Room not found.'; return; }
+  G.code = code; G.name = name; G.team = G.chosenTeamBtn;
+  sessionStorage.setItem('bc_player', JSON.stringify({code:code,name:name,team:G.team}));
+  await sAppend(rKey(code,'players'), { p:name, name:name, team:G.team, ts:Date.now() });
+  startPolling();
+}); };
+
+function startPolling(){
+  if (G.poller) G.poller.stop();
+  G.poller = makePoller(async function(){
+    var snapshot = await sSnapshot(G.code);
+    var cfg = snapshot[rKey(G.code,'cfg')];
+    if (!cfg) return;
+    G.cfg = cfg;
+    G.players = snapshot[rKey(G.code,'players')] || [];
+    if (cfg.phase === 'playing' || cfg.phase === 'ended') {
+      G.board = snapshot[rKey(G.code,'board')] || Board.emptyState();
+      G.hand = snapshot[rKey(G.code,'hand_'+G.team)];
+      for (var i=0;i<TEAM_IDS.length;i++){
+        G.allSelected[TEAM_IDS[i]] = snapshot[rKey(G.code,'sel_'+TEAM_IDS[i])];
+        G.allDice[TEAM_IDS[i]] = snapshot[rKey(G.code,'dice_'+TEAM_IDS[i])];
+      }
+      G.selected = G.allSelected[G.team];
+      G.dice = G.allDice[G.team];
+    }
+    render();
+  });
+  G.poller.start();
+}
+
+function render(){
+  if (!G.cfg) return;
+  if (G.cfg.phase === 'lobby') return renderLobby();
+  renderPlay();
+}
+
+function renderLobby(){
+  show('screen-lobby');
+  $('#lobbyCode').textContent = G.cfg.code;
+  $('#lobbyTeam').innerHTML = '<span class="bc-team-pill '+G.team+'">'+TEAMS[G.team].display+'</span>';
+  var members = G.players.filter(function(p){return p.team===G.team;});
+  $('#lobbyRoster').innerHTML = '<div class="bc-muted">Teammates: '+members.map(function(m){return escapeHtml(m.name);}).join(', ')+'</div>';
+}
+
+var boardInit = false;
+function renderPlay(){
+  show('screen-play');
+  $('#playCode').textContent = G.cfg.code;
+  $('#myTeamPill').innerHTML = '<span class="bc-team-pill '+G.team+'">'+TEAMS[G.team].display+'</span>';
+  $('#roundNum').textContent = G.cfg.round+1;
+  $('#roundTotal').textContent = G.cfg.envDeck.length;
+  var phaseText = {
+    idle: 'Waiting for moderator to flip env card',
+    prep: 'Select one resource + one outcome (60s)',
+    pitched: G.cfg.envDeck[G.cfg.envShown] && G.cfg.envDeck[G.cfg.envShown].type==='value' ? 'Pitches / extra-die pick' : 'Pitches, then roll',
+    rolling: 'Roll and move pieces',
+    ended: 'Game complete'
+  };
+  $('#phaseLabel').textContent = phaseText[G.cfg.roundPhase] || G.cfg.roundPhase;
+  var ft = G.cfg.teamOrder[G.cfg.firstTeamIdx];
+  $('#firstTeamPill').innerHTML = '<span class="bc-team-pill '+ft+'">'+TEAMS[ft].display+'</span>';
+
+  // Env
+  var envHost = $('#envDisplay');
+  if (G.cfg.envShown < 0) {
+    envHost.innerHTML = '<div class="bc-muted">Waiting for moderator to flip the environment card.</div>';
+  } else {
+    var card = G.cfg.envDeck[G.cfg.envShown];
+    envHost.innerHTML = '<div class="bc-env-card '+card.type+'"><div class="bc-env-type">'+card.type.toUpperCase()+'</div><div>'+escapeHtml(card.text)+'</div></div>';
+    if (G.cfg.timer) {
+      var rem = timerRemaining(G.cfg.timer);
+      envHost.innerHTML += '<div style="margin-top:10px;text-align:center;"><span class="bc-timer '+(rem<=10?'warn':'')+'" id="timerDisp">'+formatTime(rem)+'</span></div>';
+    }
+    if (G.cfg.roundPhase === 'pitched' && G.cfg.extraDieTo) {
+      envHost.innerHTML += '<div class="bc-ok">Extra die → '+TEAMS[G.cfg.extraDieTo].display+'</div>';
+    }
+  }
+
+  if (G.timerInt) clearInterval(G.timerInt);
+  if (G.cfg.timer) {
+    G.timerInt = setInterval(function(){
+      var rem = timerRemaining(G.cfg.timer);
+      var el = $('#timerDisp'); if (el) { el.textContent = formatTime(rem); el.className = 'bc-timer '+(rem<=10?'warn':''); }
+    }, 500);
+  }
+
+  renderHand();
+  renderPitches();
+  renderBoardAndMovement();
+}
+
+function renderHand(){
+  if (!G.hand) { $('#resList').innerHTML = ''; $('#outList').innerHTML = ''; return; }
+  var selected = G.selected || {};
+  var canSelect = G.cfg.roundPhase === 'prep';
+  var rh = '';
+  G.hand.resources.forEach(function(r){
+    var sel = selected.resource === r;
+    rh += '<div class="bc-card resource '+(sel?'selected':'')+(canSelect?'':' disabled')+'" data-res="'+escapeHtml(r)+'">'
+      +'<div class="bc-card-type">Resource</div><div class="bc-card-text">'+escapeHtml(r)+'</div></div>';
+  });
+  $('#resList').innerHTML = rh;
+
+  var oh = '';
+  G.hand.outcomes.forEach(function(o){
+    var sel = selected.outcome === o.text;
+    oh += '<div class="bc-card outcome-'+o.color+' '+(sel?'selected':'')+(canSelect?'':' disabled')+'" data-out="'+escapeHtml(o.text)+'" data-color="'+o.color+'">'
+      +'<div class="bc-card-type">Outcome · '+o.color+'</div><div class="bc-card-text">'+escapeHtml(o.text)+'</div></div>';
+  });
+  $('#outList').innerHTML = oh;
+
+  if (canSelect) {
+    document.querySelectorAll('#resList .bc-card').forEach(function(c){ c.onclick = function(){ selectResource(c.getAttribute('data-res')); }; });
+    document.querySelectorAll('#outList .bc-card').forEach(function(c){ c.onclick = function(){ selectOutcome(c.getAttribute('data-out'), c.getAttribute('data-color')); }; });
+  }
+}
+
+async function selectResource(r){
+  return guard('select-resource', async function(){
+    G.selected = await sMergeField(rKey(G.code,'sel_'+G.team), 'resource', r);
+    G.allSelected[G.team] = G.selected;
+    renderHand();
+  });
+}
+async function selectOutcome(text, color){
+  return guard('select-outcome', async function(){
+    G.selected = await sMergeFields(rKey(G.code,'sel_'+G.team), [
+      {path:'outcome', value:text},
+      {path:'outcomeColor', value:color}
+    ]);
+    G.allSelected[G.team] = G.selected;
+    renderHand();
+  });
+}
+
+function renderPitches(){
+  // Show everyone's selections (only after prep ends)
+  if (G.cfg.roundPhase === 'idle' || G.cfg.roundPhase === 'prep') {
+    $('#pitchesList').innerHTML = '<div class="bc-muted">Pitches appear after the 60s prep window.</div>';
+    return;
+  }
+  var h = '';
+  // Pitch order: starts with first team, clockwise
+  var order = [];
+  for (var i=0;i<3;i++) order.push(G.cfg.teamOrder[(G.cfg.firstTeamIdx+i)%3]);
+  order.forEach(function(t){
+    var sel = G.allSelected[t] || {};
+    h += '<div style="border-top:1px solid #eee;padding:8px 0;">';
+    h += '<div><span class="bc-team-pill '+t+'">'+TEAMS[t].short+'</span></div>';
+    h += '<div style="font-size:13px;margin-top:4px;">Resource: <b>'+escapeHtml(sel.resource||'—')+'</b></div>';
+    var oc = sel.outcomeColor ? ' <span style="color:'+PIECE_COLORS[sel.outcomeColor]+';">('+sel.outcomeColor+')</span>' : '';
+    h += '<div style="font-size:13px;">Outcome: <b>'+escapeHtml(sel.outcome||'—')+'</b>'+oc+'</div>';
+    h += '</div>';
+  });
+  $('#pitchesList').innerHTML = h;
+}
+
+function renderBoardAndMovement(){
+  if (!G.cfg.sectorAssignments) return;
+  if (!boardInit) {
+    BoardRender.init($('#boardSvg'), {
+      interactive: true,
+      onSlotClick: onSlotClick,
+      onPieceClick: onPieceClick
+    });
+    boardInit = true;
+  }
+  BoardRender.setSectors(G.cfg.sectorAssignments);
+
+  // Highlights
+  BoardRender.setHighlightSlots(null, null);
+  BoardRender.setHighlightPieces(null);
+  if (G.cfg.roundPhase === 'rolling' && G.ui.selectedDieIdx != null) {
+    var dieVal = G.dice ? G.dice.rolls[G.ui.selectedDieIdx] : null;
+    var used = G.dice && G.dice.used && G.dice.used[G.ui.selectedDieIdx];
+    if (dieVal && !used) {
+      var env = G.cfg.envDeck[G.cfg.envShown];
+      if (env.type === 'value') {
+        // valid pieces = our team's pieces, plus any aligned piece (rules: any team may move aligned pairs)
+        var myPieces = G.board.pieces.filter(function(p){
+          if (p.removed) return false;
+          return p.team === G.team || Board.isAligned(G.board, p);
+        });
+        BoardRender.setHighlightPieces(myPieces.map(function(p){return p.id;}));
+      } else {
+        // challenge: any piece we're allowed to push back (not aligned, not at end)
+        var candidates = G.board.pieces.filter(function(p){ return Board.canMoveBackward(G.board, p); });
+        BoardRender.setHighlightPieces(candidates.map(function(p){return p.id;}));
+      }
+    }
+  }
+
+  BoardRender.render(G.board);
+
+  // Dice row
+  var dh = '';
+  if (G.dice && G.dice.rolls) {
+    G.dice.rolls.forEach(function(n, i){
+      var used = G.dice.used && G.dice.used[i];
+      var sel = G.ui.selectedDieIdx === i;
+      dh += '<div class="bc-die'+(used?' used':'')+'" data-die="'+i+'" style="cursor:'+(used?'default':'pointer')+';outline:'+(sel?'3px solid #ffd400':'none')+';">'+n+'</div>';
+    });
+  }
+  $('#diceRow').innerHTML = dh;
+  document.querySelectorAll('#diceRow .bc-die').forEach(function(b){
+    b.onclick = function(){
+      var idx = +b.getAttribute('data-die');
+      if (G.dice.used && G.dice.used[idx]) return;
+      G.ui.selectedDieIdx = (G.ui.selectedDieIdx === idx) ? null : idx;
+      G.ui.selectedPieceId = null; G.ui.placing = false;
+      renderBoardAndMovement();
+    };
+  });
+
+  // Placement controls (value round, if we have outcome selected + a die picked)
+  var ph = '';
+  var envCard = G.cfg.envDeck[G.cfg.envShown];
+  if (G.cfg.roundPhase === 'rolling' && envCard && envCard.type === 'value' && G.ui.selectedDieIdx != null) {
+    var used = G.dice && G.dice.used && G.dice.used[G.ui.selectedDieIdx];
+    if (!used) {
+      var sel = G.allSelected[G.team] || {};
+      if (sel.outcomeColor && sel.outcomeColor !== 'mixed') {
+        ph += '<button class="bc-btn" id="btnPlace">Place new '+sel.outcomeColor+' piece (uses die)</button>';
+      } else if (G.team === 'balanced') {
+        ph += '<div class="bc-row">';
+        ph += '<button class="bc-btn" data-color="research">Place research piece</button>';
+        ph += '<button class="bc-btn" data-color="patient">Place patient piece</button>';
+        ph += '</div>';
+      }
+    }
+  }
+  // Hint
+  var hint = '';
+  if (G.cfg.roundPhase !== 'rolling') {
+    hint = '';
+  } else if (G.ui.selectedDieIdx == null) {
+    hint = 'Click a die to begin a move.';
+  } else if (G.ui.placing) {
+    hint = 'Click a sector slot near your team to place the new piece.';
+  } else if (envCard.type === 'value') {
+    if (G.ui.selectedPieceId == null) hint = 'Pick one of your pieces (green outline) to move forward, or place a new piece.';
+    else hint = 'Click the destination slot to move up to '+G.dice.rolls[G.ui.selectedDieIdx]+' spaces.';
+  } else {
+    if (G.ui.selectedPieceId == null) hint = 'Pick a piece to push back by '+G.dice.rolls[G.ui.selectedDieIdx]+'.';
+    else hint = 'Confirming move…';
+  }
+  $('#moveHint').style.display = hint ? 'block' : 'none';
+  $('#moveHint').textContent = hint;
+  $('#placeControls').innerHTML = ph;
+  var pb = $('#btnPlace'); if (pb) pb.onclick = function(){ startPlacing(sel.outcomeColor); };
+  document.querySelectorAll('#placeControls [data-color]').forEach(function(b){ b.onclick = function(){ startPlacing(b.getAttribute('data-color')); }; });
+}
+
+function startPlacing(color){
+  G.ui.placing = true; G.ui.placingColor = color; G.ui.selectedPieceId = null;
+  // Players may place on the central start of ANY sector — highlight all three.
+  BoardRender.setHighlightSlotsMulti(SECTOR_IDS.map(function(s){ return { sector:s, slots:[0] }; }));
+  BoardRender.render(G.board);
+  $('#moveHint').style.display = 'block';
+  $('#moveHint').textContent = 'Click the center start slot of any sector to place the '+color+' piece.';
+}
+
+async function onPieceClick(pieceId){
+  if (G.cfg.roundPhase !== 'rolling') return;
+  if (G.ui.selectedDieIdx == null) { $('#moveHint').style.display='block'; $('#moveHint').textContent='Pick a die first.'; return; }
+  var dieVal = G.dice.rolls[G.ui.selectedDieIdx];
+  if (G.dice.used && G.dice.used[G.ui.selectedDieIdx]) return;
+  var envCard = G.cfg.envDeck[G.cfg.envShown];
+  var piece = G.board.pieces.find(function(p){return p.id===pieceId;});
+  if (!piece) return;
+
+  if (envCard.type === 'challenge') {
+    // move back by die
+    if (!Board.canMoveBackward(G.board, piece)) { alert('That piece cannot be moved back.'); return; }
+    await commitMove({type:'backward', pieceId:pieceId});
+    return;
+  }
+
+  // Value round: select piece; then require slot click for destination
+  if (piece.team !== G.team && !Board.isAligned(G.board, piece)) { alert('Only your team or aligned pieces may be moved.'); return; }
+  G.ui.selectedPieceId = pieceId;
+  G.ui.placing = false;
+  // highlight valid forward slots on that piece's sector
+  var maxStep = Board.isAligned(G.board, piece) ? dieVal * 2 : dieVal;
+  var L = Board.sectorLength(piece.sector);
+  var slots = [];
+  for (var s = piece.slot + 1; s <= Math.min(L-1, piece.slot + maxStep); s++) slots.push(s);
+  BoardRender.setHighlightSlots(piece.sector, slots);
+  BoardRender.render(G.board);
+}
+
+async function onSlotClick(sector, slot){
+  if (G.cfg.roundPhase !== 'rolling') return;
+  if (G.ui.selectedDieIdx == null) return;
+  var dieVal = G.dice.rolls[G.ui.selectedDieIdx];
+
+  // Placing a new piece — any sector's center start slot is valid
+  if (G.ui.placing) {
+    if (slot !== 0) { alert('Place on a center start slot (the inner circle of any sector).'); return; }
+    await commitMove({type:'place', sector:sector, color:G.ui.placingColor});
+    return;
+  }
+
+  // Moving selected piece
+  if (G.ui.selectedPieceId == null) return;
+  var piece = G.board.pieces.find(function(p){return p.id===G.ui.selectedPieceId;});
+  if (!piece || piece.sector !== sector) return;
+  var aligned = Board.isAligned(G.board, piece);
+  var maxStep = aligned ? dieVal * 2 : dieVal;
+  if (slot <= piece.slot || slot > piece.slot + maxStep) { alert('Out of range.'); return; }
+  await commitMove({type:'forward', pieceId:piece.id, destination:slot});
+}
+
+async function commitMove(move){
+  var dieIndex = G.ui.selectedDieIdx;
+  return guard('apply-move', async function(){
+    var result = await sApplyMove(G.code, G.team, dieIndex, move, newActionId());
+    var boardKey = rKey(G.code,'board');
+    var diceKey = rKey(G.code,'dice_'+G.team);
+    G.board = result.values[boardKey] || syncCached(boardKey) || G.board;
+    G.dice = result.values[diceKey] || syncCached(diceKey) || G.dice;
+    G.allDice[G.team] = G.dice;
+    G.ui.selectedDieIdx = null;
+    G.ui.selectedPieceId = null;
+    G.ui.placing = false;
+    G.ui.placingColor = null;
+    renderBoardAndMovement();
+  });
+}
+
+// Auto-rejoin
+(function(){
+  var saved = sessionStorage.getItem('bc_player');
+  if (saved) {
+    try {
+      var s = JSON.parse(saved);
+      G.code = s.code; G.name = s.name; G.team = s.team;
+      sGet(rKey(G.code,'cfg')).then(function(cfg){ if (cfg) startPolling(); else sessionStorage.removeItem('bc_player'); });
+    } catch(e){}
+  }
+})();
+</script>
+</body>
+</html>
