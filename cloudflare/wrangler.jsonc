@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "broadening-circles",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "8c9d21fd-a43f-4e45-b435-c947a7ae7717",
       "migrations_dir": "migrations"
     }
   ]
