@@ -8,6 +8,7 @@ data/*.sqlite-wal
 
 # Test and editor artifacts
 coverage/
+dist/
 .idea/
 .vscode/
 *.log

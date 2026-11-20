@@ -1,0 +1,17 @@
+{
+  "name": "broadening-circles-cloudflare",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:create": "wrangler d1 create broadening-circles",
+    "db:migrate:local": "wrangler d1 migrations apply broadening-circles --local",
+    "db:migrate:remote": "wrangler d1 migrations apply broadening-circles --remote",
+    "deploy": "wrangler deploy",
+    "test:integration": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.166.0"
+  }
+}

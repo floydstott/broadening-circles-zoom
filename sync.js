@@ -2,7 +2,9 @@
 // The server is authoritative. Reads carry versions, stale responses are ignored,
 // and game actions are committed atomically by sync.php.
 
-var SYNC = 'sync.php';
+// The retained PHP edition uses sync.php. GitHub Pages overwrites config.js
+// during deployment so the same client talks to the Cloudflare Worker instead.
+var SYNC = (typeof window !== 'undefined' && window.BC_SYNC_URL) || 'sync.php';
 var POLL_MS = 2000;
 
 var SyncState = {

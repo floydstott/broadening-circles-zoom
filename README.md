@@ -13,6 +13,7 @@ The project is designed for an in-person or video-conference workshop. It provid
 - Atomic field updates and transactional board moves that protect simultaneous actions.
 - Automatic migration of legacy `data/room_*.json` room files on first startup.
 - Automated client and server concurrency tests.
+- Two retained deployment paths: PHP/SQLite or GitHub Pages with Cloudflare Workers/D1.
 
 ## Requirements
 
@@ -70,6 +71,8 @@ Shared fields use atomic merge operations. Board moves are validated and committ
 
 See [Sync architecture and deployment](docs/SYNC_ARCHITECTURE.md) for migration, rollback, operational, and live-device testing guidance.
 
+For a no-cost public deployment, see [GitHub Pages and Cloudflare hosting](docs/FREE_HOSTING.md). This keeps the PHP version intact while adding a Pages-compatible synchronization backend.
+
 ## Project structure
 
 | Path | Purpose |
@@ -84,6 +87,8 @@ See [Sync architecture and deployment](docs/SYNC_ARCHITECTURE.md) for migration,
 | `styles.css` | Shared visual styling |
 | `tests/` | Client and PHP/SQLite concurrency tests |
 | `data/` | Default SQLite location and Apache access protection |
+| `cloudflare/` | Worker/D1 backend for the GitHub Pages edition |
+| `.github/workflows/pages.yml` | Automatic GitHub Pages deployment |
 
 ## Testing
 
